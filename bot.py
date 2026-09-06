@@ -1,9 +1,26 @@
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 import yt_dlp
 
-# تم وضع التوكن الخاص بك هنا
+# --- سيرفر وهمي لإبقاء الخدمة نشطة على ريندر مجاناً ---
+class SimpleServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running successfully!")
+
+def run_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleServer)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
+# ----------------------------------------------------
+
+# توكن البوت
 BOT_TOKEN = "8945302717:AAHEAkn89ygLc5QtwhuWRKIG-v0ucebQfyY"
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -95,4 +112,4 @@ def process_download(call):
             os.remove(final_filename)
 
 bot.infinity_polling()
-      
+    
