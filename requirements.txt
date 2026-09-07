@@ -1,5 +1,3 @@
 pyTelegramBotAPI
-git+https://github.com/yt-dlp/yt-dlp.git
+yt-dlp>=2025.1.1
 requests
-urllib3
-imageio-ffmpeg
