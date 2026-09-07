@@ -1,4 +1,4 @@
+pyTelegramBotAPI
 git+https://github.com/yt-dlp/yt-dlp.git
-python-telegram-bot
 requests
 urllib3
