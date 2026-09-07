@@ -1,7 +1,15 @@
+import requests
 import yt_dlp
 
+def expand_url(url):
+    try:
+        # فك الرابط المختصر والوصول للرابط النهائي
+        response = requests.head(url, allow_redirects=True, timeout=5)
+        return response.url
+    except Exception:
+        return url
+
 # خريطة الجودات لليوتيوب وتيك توك
-# نستخدم دمج الفيديو والصوت تلقائياً مع السماح بالهبوط لأفضل جودة متاحة إذا لم يتطابق الارتفاع بالضبط
 FORMAT_OPTIONS = {
     '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
     '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
@@ -23,7 +31,6 @@ def get_ydl_opts(quality_key):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
-        # منع التوقف في حال وجود مشاكل ببروتوكول HTTPS
         'nocheckcertificate': True,
     }
 
@@ -34,8 +41,6 @@ def get_ydl_opts(quality_key):
             'preferredquality': '192',
         }]
     else:
-        # دمج المقاطع في صيغة mp4 متوافقة مع تليجرام
         opts['merge_output_format'] = 'mp4'
 
     return opts
-    
