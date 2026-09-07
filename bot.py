@@ -1,123 +1,125 @@
 import os
-import requests
+import re
+import glob
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 import yt_dlp
-import imageio_ffmpeg
+
+# خادم ويب وهمي لمنع نوم السيرفر على Render
+class SimpleServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot Server is Live!")
+
+def run_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleServer)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
 
 BOT_TOKEN = "8945302717:AAHEAkn89ygLc5QtwhuWRKIG-v0ucebQfyY"
-
 bot = telebot.TeleBot(BOT_TOKEN)
-
 user_links = {}
 
-def expand_url(url):
-    try:
-        response = requests.head(url, allow_redirects=True, timeout=10)
-        return response.url
-    except Exception:
-        return url
+def extract_url(text):
+    match = re.search(r'(https?://[^\s]+)', text)
+    return match.group(1).strip() if match else None
 
-FORMAT_OPTIONS = {
-    '360p': 'bestvideo[height<=360]+bestaudio/best[height<=360]/best',
-    '480p': 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
-    '720p': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-    '1080p': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
-    'mp3': 'bestaudio/best'
-}
-
-def get_ydl_opts(quality_key):
-    is_audio = quality_key == 'mp3'
-    os.makedirs('downloads', exist_ok=True)
-    
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-
-    opts = {
-        'format': FORMAT_OPTIONS.get(quality_key, 'best'),
-        'outtmpl': 'downloads/%(id)s.%(ext)s',
-        'ffmpeg_location': ffmpeg_exe,
-        'quiet': True,
-        'no_warnings': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://www.tiktok.com/',
-        },
-        'nocheckcertificate': True,
-    }
-
-    if is_audio:
-        opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-    else:
-        opts['merge_output_format'] = 'mp4'
-
-    return opts
-
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, "مرحباً بك! أرسل رابط الفيديو من تيك توك أو يوتيوب للتحميل مباشرة.")
+    bot.reply_to(message, "👋 مرحباً بك! أرسل رابط الفيديو (يوتيوب أو تيك توك) وسأقوم بتحميله مباشرة.")
 
-@bot.message_handler(func=lambda msg: msg.text and ("tiktok.com" in msg.text or "youtu" in msg.text))
+@bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ["tiktok.com", "youtube.com", "youtu.be"]))
 def handle_link(message):
-    chat_id = message.chat.id
-    raw_url = message.text.strip()
-    
-    full_url = expand_url(raw_url)
-    user_links[chat_id] = full_url
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_360 = types.InlineKeyboardButton("🎬 360p", callback_data="360p")
-    btn_480 = types.InlineKeyboardButton("🎬 480p", callback_data="480p")
-    btn_720 = types.InlineKeyboardButton("🎬 720p", callback_data="720p")
-    btn_1080 = types.InlineKeyboardButton("🎬 1080p", callback_data="1080p")
-    btn_mp3 = types.InlineKeyboardButton("🎵 استخراج صوت MP3", callback_data="mp3")
-    
-    markup.add(btn_360, btn_480, btn_720, btn_1080)
-    markup.add(btn_mp3)
-
-    bot.reply_to(message, "اختر الجودة أو الصيغة المطلوبة:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: True)
-def process_download(call):
-    chat_id = call.message.chat.id
-    quality = call.data
-    url = user_links.get(chat_id)
+    user_id = message.from_user.id
+    url = extract_url(message.text)
 
     if not url:
-        bot.send_message(chat_id, "⚠️ انتهت صلاحية الطلب، يرجى إعادة إرسال الرابط من جديد.")
+        bot.reply_to(message, "⚠️ يرجى إرسال رابط صالح.")
         return
 
-    status_msg = bot.send_message(chat_id, "⏳ جاري التحميل والمعالجة، يرجى الانتظار...")
+    user_links[user_id] = url
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🎬 تحميل الفيديو", callback_data="res_video"),
+        types.InlineKeyboardButton("🎵 استخراج الصوت MP3", callback_data="res_audio")
+    )
+    bot.reply_to(message, "اختر المطلوب:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('res_'))
+def process_download(call):
+    user_id = call.from_user.id
+    choice = call.data.replace('res_', '')
+
+    if user_id not in user_links:
+        bot.answer_callback_query(call.id, "انتهت صلاحية الرابط، يرجى إرساله مجدداً.")
+        return
+
+    url = user_links[user_id]
+    msg = bot.send_message(call.message.chat.id, "⏳ جاري الفحص والتنزيل...")
+
+    output_template = f"dl_{user_id}_%(id)s.%(ext)s"
+
+    # إعدادات مخصصة لتجاوز حظر المنصات
+    ydl_opts = {
+        'outtmpl': output_template,
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'max_filesize': 49 * 1024 * 1024,
+        'extractor_args': {
+            'youtube': {'player_client': ['android', 'ios']},
+            'tiktok': {'app_version': ['latest']}
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        }
+    }
+
+    if choice == 'audio':
+        ydl_opts['format'] = 'bestaudio/best'
+    else:
+        # جلب صيغة متكاملة مباشرة صوت وصورة دون اشتراط برامج دمج
+        ydl_opts['format'] = 'best[ext=mp4]/best'
 
     try:
-        ydl_opts = get_ydl_opts(quality)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
+            ydl.download([url])
 
-            if quality == 'mp3':
-                file_path = os.path.splitext(file_path)[0] + '.mp3'
+        files = glob.glob(f"dl_{user_id}_*")
+        if not files:
+            raise Exception("لم يتم العثور على الملف بعد اكتمال التنزيل.")
 
-        with open(file_path, 'rb') as media_file:
-            if quality == 'mp3':
-                bot.send_audio(chat_id, media_file)
+        downloaded_file = files[0]
+
+        bot.edit_message_text("⚡ تم التنزيل بنجاح، جاري الرفع للشات...", call.message.chat.id, msg.message_id)
+
+        bot.send_chat_action(call.message.chat.id, 'upload_document' if choice == 'audio' else 'upload_video')
+        with open(downloaded_file, 'rb') as f:
+            if choice == 'audio':
+                bot.send_audio(call.message.chat.id, f, caption="تم استخراج الصوت 🎵")
             else:
-                bot.send_video(chat_id, media_file)
+                bot.send_video(call.message.chat.id, f, caption="تم التحميل بنجاح 🎬")
 
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-        bot.delete_message(chat_id, status_msg.message_id)
+        bot.delete_message(call.message.chat.id, msg.message_id)
 
     except Exception as e:
-        error_details = str(e)
-        print(f"Error during download: {error_details}")
-        bot.edit_message_text(f"⚠️ فشل التحميل بسبب:\n`{error_details[:150]}`", chat_id, status_msg.message_id, parse_mode="Markdown")
+        err_msg = str(e)
+        if "File is larger than max_filesize" in err_msg:
+            bot.edit_message_text("⚠️ حجم المقطع أكبر من 50 ميغابايت (حد تيليجرام الأقصى).", call.message.chat.id, msg.message_id)
+        else:
+            bot.edit_message_text(f"⚠️ فشل التحميل بسبب:\n`{err_msg[:120]}`", parse_mode="Markdown", chat_id=call.message.chat.id, message_id=msg.message_id)
 
-if __name__ == "__main__":
-    bot.infinity_polling()
+    finally:
+        for f in glob.glob(f"dl_{user_id}_*"):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+bot.infinity_polling()
