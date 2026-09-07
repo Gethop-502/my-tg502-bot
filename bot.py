@@ -6,12 +6,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 
-# خادم ويب وهمي لمنع توقف الاستضافة على Render
+# خادم وهمي لمنع توقف البوت على Render
 class SimpleServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is fully active 24/7!")
+        self.wfile.write(b"Bot 24/7 Active!")
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -26,39 +26,33 @@ user_links = {}
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-def clean_input_url(text):
+def clean_url(text):
     match = re.search(r'(https?://[^\s]+)', text)
     if not match:
         return None
-    url = match.group(1).strip()
-    return url.split("?si=")[0]
-
-def extract_youtube_id(url):
-    pattern = r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})'
-    match = re.search(pattern, url)
-    return match.group(1) if match else None
+    return match.group(1).strip().split("?si=")[0]
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 أهلاً بك! أرسل أي رابط من تيك توك أو يوتيوب لبدء التحميل فوراً.")
+    bot.reply_to(message, "👋 أهلاً بك! أرسل رابط المقطع (يوتيوب أو تيك توك) وسأقوم بتحميله فوراً.")
 
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ["tiktok.com", "youtube.com", "youtu.be"]))
 def handle_link(message):
     user_id = message.from_user.id
-    clean_url = clean_input_url(message.text)
+    url = clean_url(message.text)
 
-    if not clean_url:
+    if not url:
         bot.reply_to(message, "⚠️ يرجى إرسال رابط صالح.")
         return
 
-    user_links[user_id] = clean_url
+    user_links[user_id] = url
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("🎬 تحميل الفيديو (MP4)", callback_data="res_video"),
         types.InlineKeyboardButton("🎵 استخراج الصوت (MP3)", callback_data="res_audio")
     )
-    bot.reply_to(message, "اختر ما ترغب بتحميله:", reply_markup=markup)
+    bot.reply_to(message, "اختر طريقة التنزيل:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('res_'))
 def process_download(call):
@@ -70,90 +64,110 @@ def process_download(call):
         return
 
     url = user_links[user_id]
-    msg = bot.send_message(call.message.chat.id, "⏳ جاري استخراج المقطع وتجهيزه...")
+    msg = bot.send_message(call.message.chat.id, "⏳ جاري استخراج الرابط المباشر وفك التشفير...")
 
-    stream_url = None
+    download_url = None
 
-    # --------------------------------------------------
-    # 1. مسار تيك توك عبر محرك TikWM لتجاوز حظر Render
-    # --------------------------------------------------
+    # --- 1. مسار تيك توك (TikTok) ---
     if "tiktok.com" in url:
         try:
-            req_url = f"https://www.tikwm.com/api/?url={url}&hd=1"
-            res = requests.get(req_url, headers={"User-Agent": USER_AGENT}, timeout=15).json()
+            # محاولة عبر TikWM API
+            res = requests.post("https://www.tikwm.com/api/", data={"url": url}, headers={"User-Agent": USER_AGENT}, timeout=15).json()
             if res.get("code") == 0:
                 data = res.get("data", {})
-                stream_url = data.get("music") if choice == "audio" else (data.get("play") or data.get("wmplay"))
+                download_url = data.get("music") if choice == "audio" else (data.get("play") or data.get("wmplay"))
         except Exception:
             pass
 
-    # --------------------------------------------------
-    # 2. مسار يوتيوب عبر خوادم Invidious النشطة
-    # --------------------------------------------------
-    elif any(d in url for d in ["youtube.com", "youtu.be"]):
-        video_id = extract_youtube_id(url)
-        if not video_id:
-            bot.edit_message_text("⚠️ تعذر استخراج معرّف فيديو يوتيوب من الرابط.", call.message.chat.id, msg.message_id)
-            return
-
-        invidious_hosts = [
-            "https://inv.nadeko.net",
-            "https://invidious.nerdvpn.de",
-            "https://invidious.jing.rocks",
-            "https://yt.artemislena.eu"
-        ]
-
-        for host in invidious_hosts:
+        if not download_url:
             try:
-                # استخدام صيغ البث المباشرة (itag 18 للفيديو و itag 140 للصوت)
-                itag = "140" if choice == "audio" else "18"
-                test_url = f"{host}/latest_version?id={video_id}&itag={itag}"
-                check = requests.head(test_url, headers={"User-Agent": USER_AGENT}, allow_redirects=True, timeout=8)
-                if check.status_code in [200, 302]:
-                    stream_url = check.url
-                    break
+                # محاولة احتياطية عبر lovetik
+                r = requests.post("https://lovetik.com/api/ajax/search", data={"query": url}, timeout=15).json()
+                links = r.get("links", [])
+                if choice == "audio":
+                    download_url = links[-1].get("a")
+                else:
+                    download_url = links[0].get("a")
+            except Exception:
+                pass
+
+    # --- 2. مسار يوتيوب (YouTube) عبر واجهات تفريغ وسيطة خارجية ---
+    elif any(d in url for d in ["youtube.com", "youtu.be"]):
+        # المحاولة الأولى: cobalt instances النشطة
+        cobalt_nodes = [
+            "https://api.cobalt.tools/api/json",
+            "https://cobalt-api.kwiatekm.tokyo/api/json",
+            "https://api.wuk.sh/api/json"
+        ]
+        
+        for node in cobalt_nodes:
+            try:
+                payload = {
+                    "url": url,
+                    "videoQuality": "720",
+                    "downloadMode": "audio" if choice == "audio" else "auto"
+                }
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": USER_AGENT
+                }
+                resp = requests.post(node, json=payload, headers=headers, timeout=12)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    download_url = data.get("url")
+                    if download_url:
+                        break
             except Exception:
                 continue
 
-    if not stream_url:
-        bot.edit_message_text("⚠️ تعذر جلب رابط التحميل، قد يكون المقطع خاصاً أو مقيداً جغرافياً.", call.message.chat.id, msg.message_id)
+        # المحاولة الثانية: yt-downloaders API بديل
+        if not download_url:
+            try:
+                api_req = f"https://api.siputzx.my.id/api/d/ytmp4?url={url}" if choice != "audio" else f"https://api.siputzx.my.id/api/d/ytmp3?url={url}"
+                res = requests.get(api_req, timeout=15).json()
+                download_url = res.get("data", {}).get("dl") or res.get("data", {}).get("url")
+            except Exception:
+                pass
+
+    if not download_url:
+        bot.edit_message_text("⚠️ تعذر فك تشفير هذا الرابط حالياً من المصدر، يرجى تجربة رابط آخر.", call.message.chat.id, msg.message_id)
         return
 
-    # --------------------------------------------------
-    # 3. سحب الملف ورفعه إلى تيليجرام
-    # --------------------------------------------------
-    bot.edit_message_text("⚡ تم جلب الرابط، جاري الرفع إلى تيليجرام...", call.message.chat.id, msg.message_id)
-
+    # --- تنزيل الملف ورفعه للمحادثة ---
+    bot.edit_message_text("⚡ تم الحصول على المقطع، جاري التنزيل والرفع للشات...", call.message.chat.id, msg.message_id)
     ext = "mp3" if choice == "audio" else "mp4"
     local_file = f"media_{user_id}.{ext}"
 
     try:
-        with requests.get(stream_url, headers={"User-Agent": USER_AGENT}, stream=True, timeout=60) as r:
+        with requests.get(download_url, headers={"User-Agent": USER_AGENT}, stream=True, timeout=60) as r:
             r.raise_for_status()
             with open(local_file, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
 
-        # فحص سقف التيليجرام (50 ميغابايت)
-        if os.path.exists(local_file) and os.path.getsize(local_file) > 49 * 1024 * 1024:
+        file_size = os.path.getsize(local_file)
+        if file_size > 49 * 1024 * 1024:
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("📥 تنزيل المقطع مباشرة", url=stream_url))
-            bot.edit_message_text("⚠️ حجم المقطع يتجاوز 50 ميغا، اضغط الزر لتحميله مباشرة لجهازك:", call.message.chat.id, msg.message_id, reply_markup=markup)
+            markup.add(types.InlineKeyboardButton("📥 اضغط هنا للتحميل المباشر", url=download_url))
+            bot.edit_message_text("⚠️ حجم المقطع يتجاوز 50 ميغا، يمكنك تحميله لجهازك مباشرة عبر الرابط أدناه:", call.message.chat.id, msg.message_id, reply_markup=markup)
             os.remove(local_file)
             return
 
         bot.send_chat_action(call.message.chat.id, "upload_document" if choice == "audio" else "upload_video")
         with open(local_file, "rb") as f:
             if choice == "audio":
-                bot.send_audio(call.message.chat.id, f, caption="تم استخراج الصوت بنجاح 🎵")
+                bot.send_audio(call.message.chat.id, f, caption="تم استخراج الصوت 🎵")
             else:
                 bot.send_video(call.message.chat.id, f, caption="تم التحميل بنجاح 🎬", supports_streaming=True)
 
         bot.delete_message(call.message.chat.id, msg.message_id)
 
-    except Exception as e:
-        bot.edit_message_text("⚠️ حدث خطأ أثناء إرسال الملف، حاول مجدداً.", call.message.chat.id, msg.message_id)
+    except Exception:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📥 فتح رابط التنزيل المباشر", url=download_url))
+        bot.edit_message_text("تعذر إرسال الملف مباشرة للشات، يمكنك تنزيله عبر الرابط المباشر:", call.message.chat.id, msg.message_id, reply_markup=markup)
 
     finally:
         if os.path.exists(local_file):
