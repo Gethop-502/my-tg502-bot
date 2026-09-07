@@ -6,12 +6,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 
-# خادم وهمي لإبقاء البوت نشطاً
+# خادم وهمي لإبقاء البوت نشطاً على Render
 class SimpleServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is Running 24/7!")
+        self.wfile.write(b"Server Live 24/7!")
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -24,38 +24,40 @@ BOT_TOKEN = "8945302717:AAHEAkn89ygLc5QtwhuWRKIG-v0ucebQfyY"
 bot = telebot.TeleBot(BOT_TOKEN)
 user_links = {}
 
-def extract_clean_url(text):
-    # استخراج أي رابط يبدأ بـ http أو https بدقة متناهية وفصله عن الكلام العربي
-    match = re.search(r'(https?://[^\s]+)', text)
+USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+
+def clean_and_resolve_url(raw_text):
+    # استخراج الرابط بدقة وعزله عن أي نصوص أخرى
+    match = re.search(r'(https?://[^\s]+)', raw_text)
     if not match:
         return None
     url = match.group(1).strip()
-    # تنظيف أي علامات أو مسافات قد تلتصق بنهاية الرابط
-    url = url.split("?")[0]
+
+    # فك توجيه الروابط المختصرة (vm.tiktok / vt.tiktok / youtu.be)
+    try:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        res = session.get(url, allow_redirects=True, timeout=12)
+        url = res.url.split("?")[0]
+    except Exception:
+        url = url.split("?")[0]
+        
     return url
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 مرحباً بك! أرسل رابط الفيديو وسأقوم بتحميله فوراً وبدون أي أخطاء.")
+    bot.reply_to(message, "👋 مرحباً بك! أرسل رابط الفيديو (يوتيوب أو تيك توك) وسأقوم بتحميله فوراً.")
 
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ["tiktok.com", "youtube.com", "youtu.be"]))
 def handle_link(message):
     user_id = message.from_user.id
-    raw_url = extract_clean_url(message.text)
+    url = clean_and_resolve_url(message.text)
 
-    if not raw_url:
-        bot.reply_to(message, "⚠️ لم يتم العثور على رابط صحيح، أعد إرساله بمفرده.")
+    if not url:
+        bot.reply_to(message, "⚠️ الرابط غير صالح، تأكد من إرسال رابط صحيح.")
         return
 
-    # فك توجيه الروابط المختصرة مثل vm.tiktok.com
-    try:
-        if "vm.tiktok.com" in raw_url or "vt.tiktok.com" in raw_url or "youtu.be" in raw_url:
-            resp = requests.head(raw_url, allow_redirects=True, timeout=10)
-            raw_url = resp.url.split("?")[0]
-    except Exception:
-        pass
-
-    user_links[user_id] = raw_url
+    user_links[user_id] = url
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -77,65 +79,71 @@ def process_download(call):
         return
 
     url = user_links[user_id]
-    msg = bot.send_message(call.message.chat.id, "⏳ جاري جلب المقطع وفك التشفير...")
+    msg = bot.send_message(call.message.chat.id, "⏳ جاري استخراج وتجهيز الملف...")
 
     download_url = None
 
-    # مسار تنزيل تيك توك المباشر والسريع
+    # --- معالجة تيك توك عبر واجهتين لضمان النجاح ---
     if "tiktok.com" in url:
+        # المحاولة الأولى: tikwm
         try:
-            # استخدام API مباشر ومجاني لتيك توك بدون علامة مائية
-            tt_api = f"https://www.tikwm.com/api/?url={url}"
-            r = requests.get(tt_api, timeout=15).json()
+            r = requests.post("https://www.tikwm.com/api/", data={"url": url}, headers={"User-Agent": USER_AGENT}, timeout=15).json()
             if r.get("code") == 0:
-                data = r.get("data", {})
-                if choice == 'mp3':
-                    download_url = data.get("music")
-                else:
-                    download_url = data.get("play") or data.get("wmplay")
+                d = r.get("data", {})
+                download_url = d.get("music") if choice == 'mp3' else (d.get("play") or d.get("wmplay"))
         except Exception:
             pass
 
-    # مسار يوتيوب أو المحاولات العامة عبر محرك Cobalt
+        # المحاولة الثانية في حال فشل الأولى: lovetik API
+        if not download_url:
+            try:
+                r2 = requests.post("https://lovetik.com/api/ajax/search", data={"query": url}, timeout=15).json()
+                if choice == 'mp3':
+                    download_url = r2.get("links", [])[-1].get("a")
+                else:
+                    download_url = r2.get("links", [])[0].get("a")
+            except Exception:
+                pass
+
+    # --- معالجة يوتيوب أو الروابط العامة عبر cobalt API ---
     if not download_url:
         try:
-            api_url = "https://api.cobalt.tools/api/json"
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json"
-            }
+            api_url = "https://co.wuk.sh/api/json"
+            headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": USER_AGENT}
             payload = {
                 "url": url,
                 "videoQuality": choice if choice != 'mp3' else "720",
                 "downloadMode": "audio" if choice == 'mp3' else "auto"
             }
-            resp = requests.post(api_url, json=payload, headers=headers, timeout=20)
-            res_data = resp.json()
-            download_url = res_data.get("url")
+            resp = requests.post(api_url, json=payload, headers=headers, timeout=20).json()
+            download_url = resp.get("url")
         except Exception:
             pass
 
     if not download_url:
-        bot.edit_message_text("⚠️ تعذر استخراج هذا الفيديو، تأكد أن الحساب ليس خاصاً (Private).", call.message.chat.id, msg.message_id)
+        bot.edit_message_text("⚠️ تعذر استخراج الرابط المباشر، قد يكون المقطع خاصاً أو مقيداً.", call.message.chat.id, msg.message_id)
         return
 
-    bot.edit_message_text("⚡ جاري تنزيل الملف وإرساله لك الآن...", call.message.chat.id, msg.message_id)
+    bot.edit_message_text("⚡ تم العثور على المقطع! جاري تنزيله ورفعه إليك...", call.message.chat.id, msg.message_id)
 
     ext = "mp3" if choice == 'mp3' else "mp4"
-    local_filename = f"dl_{user_id}.{ext}"
+    local_filename = f"file_{user_id}.{ext}"
 
     try:
-        with requests.get(download_url, stream=True, timeout=60) as r:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        with session.get(download_url, stream=True, timeout=60) as r:
             r.raise_for_status()
             with open(local_filename, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
 
+        # فحص الحجم المسموح به في تيليجرام
         if os.path.exists(local_filename) and os.path.getsize(local_filename) > 49 * 1024 * 1024:
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("📥 تنزيل المقطع مباشرة", url=download_url))
-            bot.edit_message_text("⚠️ حجم المقطع يتجاوز 50 ميغابايت، اضغط الزر للتحميل المباشر:", call.message.chat.id, msg.message_id, reply_markup=markup)
+            markup.add(types.InlineKeyboardButton("📥 تنزيل المقطع كاملاً", url=download_url))
+            bot.edit_message_text("⚠️ حجم المقطع يتجاوز 50 ميغابايت (حد التيليجرام)، اضغط أدناه للتنزيل المباشر:", call.message.chat.id, msg.message_id, reply_markup=markup)
             if os.path.exists(local_filename):
                 os.remove(local_filename)
             return
@@ -143,7 +151,7 @@ def process_download(call):
         bot.send_chat_action(call.message.chat.id, 'upload_document' if choice == 'mp3' else 'upload_video')
         with open(local_filename, 'rb') as f:
             if choice == 'mp3':
-                bot.send_audio(call.message.chat.id, f, caption="تم استخراج الصوت 🎵")
+                bot.send_audio(call.message.chat.id, f, caption="تم استخراج الصوت بنجاح 🎵")
             else:
                 bot.send_video(call.message.chat.id, f, caption=f"تم التحميل بنجاح 🎬")
 
@@ -152,7 +160,7 @@ def process_download(call):
         bot.delete_message(call.message.chat.id, msg.message_id)
 
     except Exception:
-        bot.edit_message_text("حدث خطأ أثناء رفع المقطع إلى التيليجرام.", call.message.chat.id, msg.message_id)
+        bot.edit_message_text("حدث خطأ أثناء رفع الملف إلى التيليجرام.", call.message.chat.id, msg.message_id)
         if os.path.exists(local_filename):
             os.remove(local_filename)
 
