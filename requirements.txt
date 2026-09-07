@@ -1,2 +1,5 @@
-pyTelegramBotAPI==4.19.1
+pyTelegramBotAPI
 yt-dlp
+mutagen
+pycryptodomex
+websockets
