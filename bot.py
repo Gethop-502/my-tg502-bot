@@ -3,6 +3,7 @@ import requests
 import telebot
 from telebot import types
 import yt_dlp
+import imageio_ffmpeg
 
 BOT_TOKEN = "8945302717:AAHEAkn89ygLc5QtwhuWRKIG-v0ucebQfyY"
 
@@ -29,14 +30,19 @@ def get_ydl_opts(quality_key):
     is_audio = quality_key == 'mp3'
     os.makedirs('downloads', exist_ok=True)
     
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+
     opts = {
         'format': FORMAT_OPTIONS.get(quality_key, 'best'),
         'outtmpl': 'downloads/%(id)s.%(ext)s',
+        'ffmpeg_location': ffmpeg_exe,
         'quiet': True,
         'no_warnings': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://www.tiktok.com/',
         },
         'nocheckcertificate': True,
     }
@@ -108,8 +114,10 @@ def process_download(call):
 
         bot.delete_message(chat_id, status_msg.message_id)
 
-    except Exception:
-        bot.edit_message_text("⚠️ تعذر استخراج أو تحميل المقطع. قد يكون المقطع مقيداً أو حجمه كبيراً جداً.", chat_id, status_msg.message_id)
+    except Exception as e:
+        error_details = str(e)
+        print(f"Error during download: {error_details}")
+        bot.edit_message_text(f"⚠️ فشل التحميل بسبب:\n`{error_details[:150]}`", chat_id, status_msg.message_id, parse_mode="Markdown")
 
 if __name__ == "__main__":
     bot.infinity_polling()
